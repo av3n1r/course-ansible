@@ -1,0 +1,11 @@
+[Unit]
+Description=Notes Application Service
+
+[Service]
+Environment="FLASK_APP=/opt/notes/app.py"
+ExecStart=/usr/bin/python3 -m flask run --host=0.0.0.0 --port=8000
+WorkingDirectory=/opt/notes/
+User=vagrant
+
+[Install]
+WantedBy=multi-user.target

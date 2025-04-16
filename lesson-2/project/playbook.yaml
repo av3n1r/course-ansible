@@ -1,0 +1,431 @@
+---
+- name: Configure HAProxy Load Balancer
+  hosts: haproxy
+  become: true
+  tags: haproxy
+
+  pre_tasks:
+    - name: Install python3-libdnf5
+      raw: dnf install -y python3-libdnf5
+      changed_when: false
+
+    - name: Install Python requirements
+      raw: dnf install -y python3-dnf python3-rpm
+      changed_when: false
+
+  roles:
+    - prometheus.prometheus.node_exporter
+
+  vars:
+    node_exporter_version: 1.9.1
+    node_exporter_web_listen_address: "0.0.0.0:9100"
+    node_exporter_system_user: "node_exporter"
+    node_exporter_system_group: "node_exporter"
+
+  tasks:
+    - name: Install HAProxy
+      package:
+        name:
+          - haproxy
+          - firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Allow node_exporter metrics port in firewall
+      firewalld:
+        port: 9100/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+      ignore_errors: yes
+
+    - name: Allow HAProxy port in firewall
+      firewalld:
+        port: 80/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+    - name: Copy HAProxy configuration
+      copy:
+        src: files/server1/haproxy.cfg
+        dest: /etc/haproxy/haproxy.cfg
+
+    - name: Start and enable HAProxy
+      service:
+        name: haproxy
+        enabled: yes
+        state: restarted
+
+- name: Configure MariaDB Server
+  hosts: database
+  become: true
+  tags: mariadb
+
+  roles:
+    - prometheus.prometheus.node_exporter
+
+  vars:
+    node_exporter_version: 1.9.1
+    node_exporter_web_listen_address: "0.0.0.0:9100"
+    node_exporter_system_user: "node_exporter"
+    node_exporter_system_group: "node_exporter"
+
+  tasks:
+    - name: Install MariaDB server
+      package:
+        name:
+          - mariadb-server
+          - python3-PyMySQL
+          - firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Start and enable MariaDB
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Set MariaDB root password
+      mysql_user:
+        name: root
+        host: localhost
+        password: "password!"
+        login_unix_socket: /var/lib/mysql/mysql.sock
+        state: present
+
+    - name: Create .my.cnf file
+      copy:
+        dest: /root/.my.cnf
+        content: |
+          [client]
+          user=root
+          password=password!
+        mode: '0600'
+
+    - name: Create database
+      mysql_db:
+        name: notes_db
+        state: present
+      ignore_errors: yes
+
+    - name: Create database user
+      mysql_user:
+        name: notes_user
+        password: notes_password
+        priv: 'notes_db.*:ALL'
+        host: '%'
+        state: present
+      ignore_errors: yes
+
+    - name: Set database character set and collation
+      mysql_query:
+        login_db: notes_db
+        query: |
+          ALTER DATABASE notes_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+    - name: Create notes table
+      mysql_query:
+        login_db: notes_db
+        query: |
+          CREATE TABLE IF NOT EXISTS notes (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              content TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      ignore_errors: yes
+
+    - name: Allow remote connections
+      replace:
+        path: /etc/my.cnf.d/mariadb-server.cnf
+        regexp: '^bind-address.*'
+        replace: 'bind-address = 0.0.0.0'
+      notify: restart mariadb
+
+    - name: Allow MariaDB port in firewall
+      firewalld:
+        port: 3306/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+    - name: Allow node_exporter metrics port in firewall
+      firewalld:
+        port: 9100/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+  handlers:
+    - name: restart mariadb
+      systemd:
+        name: mariadb
+        state: restarted
+
+- name: Configure Frontend Nginx Servers
+  hosts: frontend
+  become: true
+  tags: frontend
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Update dnf cache
+      dnf:
+        update_cache: yes
+      when: ansible_pkg_mgr == 'dnf'
+
+  roles:
+    - prometheus.prometheus.node_exporter
+
+  vars:
+    node_exporter_version: 1.9.1
+    node_exporter_web_listen_address: "0.0.0.0:9100"
+    node_exporter_system_user: "node_exporter"
+    node_exporter_system_group: "node_exporter"
+
+  tasks:
+    - name: Install Nginx
+      package:
+        name:
+          - nginx
+          - firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Copy Nginx configuration for server3
+      copy:
+        src: files/server3/nginx.conf
+        dest: /etc/nginx/conf.d/default.conf
+        mode: '0644'
+      when: inventory_hostname == "server3"
+      notify: restart nginx
+
+    - name: Copy Nginx configuration for server4
+      copy:
+        src: files/server4/nginx.conf
+        dest: /etc/nginx/conf.d/default.conf
+        mode: '0644'
+      when: inventory_hostname == "server4"
+      notify: restart nginx
+
+    - name: Remove default nginx site
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /etc/nginx/sites-enabled/default
+        - /etc/nginx/sites-available/default
+      when: ansible_os_family == "Debian"
+      notify: restart nginx
+
+    - name: Allow Nginx port in firewall
+      firewalld:
+        port: 80/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+    - name: Allow node_exporter metrics port in firewall
+      firewalld:
+        port: 9100/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+- name: Configure Application Server
+  hosts: application
+  become: true
+  tags: application
+
+  roles:
+    - prometheus.prometheus.node_exporter
+
+  vars:
+    node_exporter_version: 1.9.1
+    node_exporter_web_listen_address: "0.0.0.0:9100"
+    node_exporter_system_user: "node_exporter"
+    node_exporter_system_group: "node_exporter"
+
+  tasks:
+    - name: Install Python and dependencies
+      package:
+        name:
+          - python3
+          - python3-pip
+          - python3-devel
+          - firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Create notes user
+      user:
+        name: notes
+        system: yes
+        create_home: no
+
+    - name: Create application directory
+      file:
+        path: /opt/notes
+        state: directory
+        owner: notes
+        group: notes
+        mode: '0755'
+
+    - name: Install Python packages
+      pip:
+        name:
+          - flask
+          - mysql-connector-python
+        state: present
+
+    - name: Copy application files
+      copy:
+        src: files/server5/app.py
+        dest: /opt/notes/app.py
+        owner: notes
+        group: notes
+        mode: '0644'
+
+    - name: Copy systemd service file
+      copy:
+        src: files/server5/notes.service
+        dest: /etc/systemd/system/notes.service
+        mode: '0644'
+
+    - name: Start and enable notes service
+      systemd:
+        name: notes
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Allow application port in firewall
+      firewalld:
+        port: 8000/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+    - name: Allow node_exporter metrics port in firewall
+      firewalld:
+        port: 9100/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+- name: Configure Monitoring Server
+  hosts: monitoring
+  become: true
+  tags: monitoring
+
+  pre_tasks:
+    - name: Install required packages
+      package:
+        name:
+          - firewalld
+          - python3-jmespath
+          - python3-pip
+        state: present
+
+    - name: Install jmespath via pip
+      pip:
+        name: jmespath
+        state: present
+        extra_args: --ignore-installed
+
+    - name: Install firewalld
+      package:
+        name: firewalld
+        state: present
+
+    - name: Start and enable firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: Allow Grafana port
+      firewalld:
+        port: 3000/tcp
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+  vars:
+    node_exporter_version: 1.9.1
+    node_exporter_web_listen_address: "0.0.0.0:9100"
+    node_exporter_system_user: "node_exporter"
+    node_exporter_system_group: "node_exporter"
+
+    prometheus_targets:
+      node:
+        - targets:
+            - "server1:9100"  # HAProxy
+            - "server2:9100"  # MariaDB
+            - "server3:9100"  # Nginx frontend-1
+            - "server4:9100"  # Nginx frontend-2
+            - "server5:9100"  # Application
+            - "server7:9100"  # Monitoring
+          labels:
+            env: production
+
+    grafana_ini:
+      server:
+        http_addr: "0.0.0.0"
+        http_port: 3000
+        domain: "server7"
+        root_url: "http://server7:3000"
+      auth.anonymous:
+        enabled: true
+      security:
+        admin_user: admin
+        admin_password: admin123
+
+    grafana_dashboards:
+      - dashboard_id: "1860"
+        revision_id: "39"
+        datasource: "prometheus"
+        title: "Node Exporter Full"
+
+    grafana_datasources:
+    - name: prometheus
+      type: prometheus
+      access: proxy
+      url: 'http://localhost:9090'
+      basicAuth: false
+
+  roles:
+    - prometheus.prometheus.prometheus
+    - prometheus.prometheus.node_exporter
+    - grafana.grafana.grafana

@@ -1,0 +1,71 @@
+Vagrant.configure("2") do |config|
+    systems = [
+      {
+        :name => "server1",
+        :box => "bento/fedora-latest",
+        :box_version => "202502.21.0",
+        :hostname => "server1"
+      },
+      {
+        :name => "server2",
+        :box => "bento/centos-stream-9",
+        :box_version => "202502.21.0",
+        :hostname => "server2"
+      },
+      {
+        :name => "server3",
+        :box => "bento/ubuntu-24.04",
+        :box_version => "202502.21.0",
+        :hostname => "server3"
+      },
+      {
+        :name => "server4",
+        :box => "bento/debian-12",
+        :box_version => "202502.21.0",
+        :hostname => "server4"
+      },
+      {
+        :name => "server5",
+        :box => "bento/oracle-9",
+        :box_version => "202401.31.0",
+        :hostname => "server5"
+      },
+      {
+        :name => "server7",
+        :box => "bento/almalinux-9",
+        :box_version => "202502.21.0",
+        :hostname => "server7"
+      }
+    ]
+
+    systems.each do |sys|
+      config.vm.define sys[:name] do |server|
+        server.vm.box = sys[:box]
+        server.vm.box_version = sys[:box_version]
+        server.vm.synced_folder ".", "/vagrant", disabled: true  # Добавьте эту строку
+
+        if sys[:name] == "server5"
+          server.ssh.username = "vagrant"
+          server.ssh.password = "vagrant"
+          server.ssh.insert_key = false
+        end
+
+        server.vm.provider "parallels" do |prl|
+          prl.name = sys[:name]
+          prl.memory = 1024
+          prl.cpus = 8
+        end
+
+        unless sys[:name] == "server5"
+          config.vm.provision "shell" do |s|
+            ssh_pub_key = File.readlines("#{Dir.home}/.ssh/id_rsa.pub").first.strip
+            s.inline = <<-SHELL
+              echo #{ssh_pub_key} >> /home/vagrant/.ssh/authorized_keys
+              echo #{ssh_pub_key} >> /root/.ssh/authorized_keys
+            SHELL
+          end
+        end
+
+      end
+    end
+end
